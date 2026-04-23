@@ -1,0 +1,31 @@
+{
+    "experiment_4_clients": {
+        "cloudlets": {
+            "cloudlet_1": {
+                "id": 0,
+                "lat": 33.98,
+                "lon": -118.35,
+                "color": "blue"
+            },
+            "cloudlet_2": {
+                "id": 1,
+                "lat": 33.98,
+                "lon": -118.10,
+                "color": "red"
+            },
+            "cloudlet_3": {
+                "id": 2,
+                "lat": 33.86,
+                "lon": -118.35,
+                "color": "green"
+            },
+            "cloudlet_4": {
+                "id": 3,
+                "lat": 33.86,
+                "lon": -118.10,
+                "color": "orange"
+            }
+        },
+        "radius_km": 15
+    }
+}
