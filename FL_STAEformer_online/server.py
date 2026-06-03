@@ -22,12 +22,13 @@ def evaluate_metrics_aggregation_fn(all_client_metrics):
     return {"eval_loss": total_loss / total_examples}
 
 def server_fn(context):
-    num_rounds = context.run_config.get("num-server-rounds", 2)
-    fraction_train = context.run_config.get("fraction-train", 1.0)
-    fraction_evaluate = context.run_config.get("fraction-evaluate", 1.0)
+    num_rounds = context.run_config["num-server-rounds"]
+    fraction_train = context.run_config["fraction-train"]
+    fraction_evaluate = context.run_config["fraction-evaluate"]
+    num_partitions = context.run_config["num-partitions"]
     
-    local_epochs = context.run_config.get("local-epochs", 1)
-    learning_rate = context.run_config.get("learning-rate", 0.001)
+    local_epochs = context.run_config["local-epochs"]
+    learning_rate = context.run_config["learning-rate"]
 
     def fit_config(server_round: int):
         return {
@@ -38,6 +39,9 @@ def server_fn(context):
     strategy = FedAvg(
         fraction_fit=fraction_train,
         fraction_evaluate=fraction_evaluate,
+        min_fit_clients=num_partitions,
+        min_evaluate_clients=num_partitions,
+        min_available_clients=num_partitions,
         on_fit_config_fn=fit_config,
         fit_metrics_aggregation_fn=fit_metrics_aggregation_fn,
         evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn,
