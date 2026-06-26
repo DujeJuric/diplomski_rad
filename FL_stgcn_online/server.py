@@ -16,10 +16,17 @@ def evaluate_metrics_aggregation_fn(all_client_metrics):
     if total_examples == 0:
         return {}
     
-    total_loss = sum(
-        [num_examples * metrics.get("eval_loss", 0.0) for num_examples, metrics in all_client_metrics]
-    )
-    return {"eval_loss": total_loss / total_examples}
+    total_loss = sum([num_examples * metrics.get("eval_loss", 0.0) for num_examples, metrics in all_client_metrics])
+    total_mae = sum([num_examples * metrics.get("mae", 0.0) for num_examples, metrics in all_client_metrics])
+    total_rmse = sum([num_examples * metrics.get("rmse", 0.0) for num_examples, metrics in all_client_metrics])
+    total_mape = sum([num_examples * metrics.get("mape", 0.0) for num_examples, metrics in all_client_metrics])
+    
+    return {
+        "eval_loss": total_loss / total_examples,
+        "mae": total_mae / total_examples,
+        "rmse": total_rmse / total_examples,
+        "mape": total_mape / total_examples,
+    }
 
 def server_fn(context):
     num_rounds = context.run_config["num-server-rounds"]

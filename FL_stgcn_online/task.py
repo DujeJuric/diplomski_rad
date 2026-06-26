@@ -28,7 +28,7 @@ class Args:
     def __init__(self, dataset="data_PEMSD7"):
         self.dataset = dataset
         self.n_his = 12
-        self.n_pred = 3
+        self.n_pred = 12
         self.time_intvl = 5
         self.Kt = 3
         self.stblock_num = 2
@@ -40,11 +40,21 @@ class Args:
         self.droprate = 0.5
         self.gso = None
 
+_ADJ_CACHE = {}
+_PARTITION_CACHE = {}
+_DATA_CACHE = {}
+
 def load_adj(dataset_path):
+    if dataset_path in _ADJ_CACHE:
+        adj, n_vertex = _ADJ_CACHE[dataset_path]
+        return adj.copy(), n_vertex
+
     adj = sp.load_npz(os.path.join(dataset_path, 'adj.npz'))
     adj = adj.tocsc()
     n_vertex = adj.shape[0]
-    return adj, n_vertex
+    
+    _ADJ_CACHE[dataset_path] = (adj, n_vertex)
+    return adj.copy(), n_vertex
 
 def get_cloudlets(locations_json_path, cloudlet_experiment):
     with open(locations_json_path) as f:
@@ -58,6 +68,10 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return geodesic((lat1, lon1), (lat2, lon2)).km
 
 def partition_nodes_to_cloudlets_by_range_proximity(cloudlets, radius_km, dataset_path):
+    cache_key = (str(cloudlets), radius_km, dataset_path)
+    if cache_key in _PARTITION_CACHE:
+        return [list(lst) for lst in _PARTITION_CACHE[cache_key]]
+
     locations_data = pd.read_csv(os.path.join(dataset_path, 'locations-raw.csv'))
 
     cloudlet_nodes_list = [[] for _ in range(len(cloudlets))]
@@ -77,22 +91,24 @@ def partition_nodes_to_cloudlets_by_range_proximity(cloudlets, radius_km, datase
         if closest_cloudlet is not None:
             cloudlet_nodes_list[closest_cloudlet].append(idx)
 
+    _PARTITION_CACHE[cache_key] = [list(lst) for lst in cloudlet_nodes_list]
     return cloudlet_nodes_list
 
 def load_data(dataset_path):
+    if dataset_path in _DATA_CACHE:
+        train, test, len_initial, len_online = _DATA_CACHE[dataset_path]
+        return train.copy(), test.copy(), len_initial, len_online
+
     vel = pd.read_csv(os.path.join(dataset_path, 'vel.csv'))
     
-    data_col = vel.shape[0]
-    
-    # 30% initial, 40% online, 30% eval
-    len_initial = int(math.floor(data_col * 0.30))
-    len_online = int(math.floor(data_col * 0.40))
-    len_eval = int(data_col - len_initial - len_online)
+    len_initial = 3796
+    len_online = 5080
     
     train = vel[: len_initial + len_online]
     test = vel[len_initial + len_online:] 
     
-    return train, test, len_initial, len_online
+    _DATA_CACHE[dataset_path] = (train, test, len_initial, len_online)
+    return train.copy(), test.copy(), len_initial, len_online
 
 def data_transform(data, n_his, n_pred, device):
     if len(data) == 0:
@@ -157,10 +173,10 @@ def load_flower_data(dataset_name, partition_id, num_partitions, batch_size, onl
     
     node_map = torch.tensor(cln_nodes, dtype=torch.long).to(device)
     
-    train_full, test, len_initial, len_online = load_data(dataset_path)
+    train, test, len_initial, len_online = load_data(dataset_path)
     
     zscore = preprocessing.StandardScaler()
-    train_scaled = zscore.fit_transform(train_full)
+    train_scaled = zscore.fit_transform(train)
     test_scaled = zscore.transform(test)
     
     x_train, y_train = data_transform(train_scaled, args.n_his, args.n_pred, device)
@@ -172,7 +188,7 @@ def load_flower_data(dataset_name, partition_id, num_partitions, batch_size, onl
     test_data = TensorDataset(x_test, y_test)
     test_iter = DataLoader(dataset=test_data, batch_size=batch_size, shuffle=False)
     
-    return x_train, y_train, end_of_initial_data_index, data_per_step, test_iter, node_map
+    return x_train, y_train, end_of_initial_data_index, data_per_step, test_iter, node_map, zscore
 
 def create_train_iter_for_online(epoch, x_train, y_train, end_of_initial_data_index, data_per_step, batch_size):
     if epoch == 0:
@@ -206,10 +222,59 @@ def create_train_iter_for_online(epoch, x_train, y_train, end_of_initial_data_in
         train_data = TensorDataset(new_x_train, new_y_train)
         return DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True)
 
-def train_online(model, x_train, y_train, end_of_initial_data_index, data_per_step, node_map, epochs, lr, batch_size, online_steps, device, partition_id):
+def save_metrics_plot(partition_id, history):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    graphs_dir = os.path.join(current_dir, "stgcn_graphs")
+    os.makedirs(graphs_dir, exist_ok=True)
+    try:
+        import json
+        with open(os.path.join(graphs_dir, f"stgcn_client_{partition_id}_metrics.json"), "w") as f:
+            json.dump(history, f, indent=4)
+    except Exception as e:
+        print("fail")
+
+    try:
+        import matplotlib.pyplot as plt
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(f"Client {partition_id}")
+        
+        axs[0, 0].plot(history["step"], history["loss"], marker='o', color='blue')
+        axs[0, 0].set_title("Loss")
+        axs[0, 0].set_xlabel("Online Step")
+        axs[0, 0].set_ylabel("Loss")
+        axs[0, 0].grid(True)
+        
+        axs[0, 1].plot(history["step"], history["mae"], marker='s', color='orange')
+        axs[0, 1].set_title("MAE")
+        axs[0, 1].set_xlabel("Online Step")
+        axs[0, 1].set_ylabel("MAE")
+        axs[0, 1].grid(True)
+        
+        axs[1, 0].plot(history["step"], history["rmse"], marker='^', color='green')
+        axs[1, 0].set_title("RMSE")
+        axs[1, 0].set_xlabel("Online Step")
+        axs[1, 0].set_ylabel("RMSE")
+        axs[1, 0].grid(True)
+        
+        axs[1, 1].plot(history["step"], history["mape"], marker='d', color='red')
+        axs[1, 1].set_title("MAPE")
+        axs[1, 1].set_xlabel("Online Step")
+        axs[1, 1].set_ylabel("MAPE")
+        axs[1, 1].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(graphs_dir, f"stgcn_client_{partition_id}_metrics.png"), dpi=150)
+        plt.close()
+    except ImportError:
+        print("error")
+       
+
+def train_online(model, x_train, y_train, end_of_initial_data_index, data_per_step, node_map, epochs, lr, batch_size, online_steps, device, partition_id, val_iter=None, scaler=None):
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.AdamW(params=model.parameters(), lr=lr, weight_decay=0.001)
     
+    history = {"step": [], "loss": [], "mae": [], "rmse": [], "mape": []}
+
     train_iter = create_train_iter_for_online(0, x_train, y_train, end_of_initial_data_index, data_per_step, batch_size)
     model.train()
     for _ in range(epochs): 
@@ -222,6 +287,16 @@ def train_online(model, x_train, y_train, end_of_initial_data_index, data_per_st
             l.backward()
             optimizer.step()
             
+    if val_iter is not None and scaler is not None:
+        val_loss, mae, rmse, mape = test(model, val_iter, node_map, scaler)
+        print(f"Client {partition_id} | Initial Step | Loss: {val_loss:.4f} | MAE: {mae:.4f} | RMSE: {rmse:.4f} | MAPE: {mape:.4f}%", flush=True)
+        history["step"].append(0)
+        history["loss"].append(val_loss)
+        history["mae"].append(mae)
+        history["rmse"].append(rmse)
+        history["mape"].append(mape)
+        save_metrics_plot(partition_id, history)
+
     l_sum, n = 0.0, 0
     for online_step in range(1, online_steps + 1):
         train_iter = create_train_iter_for_online(online_step, x_train, y_train, end_of_initial_data_index, data_per_step, batch_size)
@@ -241,20 +316,54 @@ def train_online(model, x_train, y_train, end_of_initial_data_index, data_per_st
             l_sum += l.item() * y.shape[0]
             n += y.shape[0]
             
+        if val_iter is not None and scaler is not None:
+            val_loss, mae, rmse, mape = test(model, val_iter, node_map, scaler)
+            print(f"Client {partition_id} | Online Step {online_step:2d} | Loss: {val_loss:.4f} | MAE: {mae:.4f} | RMSE: {rmse:.4f} | MAPE: {mape:.4f}%", flush=True)
+            history["step"].append(online_step)
+            history["loss"].append(val_loss)
+            history["mae"].append(mae)
+            history["rmse"].append(rmse)
+            history["mape"].append(mape)
+            save_metrics_plot(partition_id, history)
+
     return l_sum / n if n > 0 else 0.0
 
 @torch.no_grad()
-def test(model, val_iter, node_map):
+def test(model, val_iter, node_map, scaler):
     model.eval()
     loss_fn = nn.MSELoss()
     
     l_sum, n = 0.0, 0
+    mae_sum = 0.0
+    mse_sum = 0.0
+    mape_sum = 0.0
+    total_elements = 0
+    
     for x, y in val_iter:
         y_pred = model(x).view(len(x), -1)
-        y_pred = y_pred[:, node_map]
+        y_pred_mapped = y_pred[:, node_map]
         y_mapped = y[:, node_map]
-        l = loss_fn(y_pred, y_mapped)
+        l = loss_fn(y_pred_mapped, y_mapped)
         l_sum += l.item() * y.shape[0]
         n += y.shape[0]
+      
+        y_unscaled = scaler.inverse_transform(y.cpu().numpy())
+        y_pred_unscaled = scaler.inverse_transform(y_pred.cpu().numpy())
+    
+        y_unscaled_mapped = y_unscaled[:, node_map.cpu().numpy()]
+        y_pred_unscaled_mapped = y_pred_unscaled[:, node_map.cpu().numpy()]
         
-    return l_sum / n if n > 0 else 0.0
+        diff = np.abs(y_pred_unscaled_mapped - y_unscaled_mapped)
+        
+        mae_sum += np.sum(diff)
+        mse_sum += np.sum(diff ** 2)
+    
+        mape_sum += np.sum(diff / np.where(y_unscaled_mapped == 0, 1e-5, y_unscaled_mapped))
+        total_elements += diff.size
+        
+    avg_loss = l_sum / n if n > 0 else 0.0
+    avg_mae = mae_sum / total_elements if total_elements > 0 else 0.0
+    avg_rmse = np.sqrt(mse_sum / total_elements) if total_elements > 0 else 0.0
+    avg_mape = (mape_sum / total_elements) * 100 if total_elements > 0 else 0.0
+    
+    return avg_loss, avg_mae, avg_rmse, avg_mape

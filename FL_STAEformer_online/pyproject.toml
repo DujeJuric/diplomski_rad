@@ -16,7 +16,7 @@ clientapp = "client:app"
 [tool.flwr.app.config]
 num-server-rounds = 1
 local-epochs = 1
-online-steps = 1
+online-steps = 40
 batch-size = 16
 learning-rate = 0.001
 fraction-train = 1.0

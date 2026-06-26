@@ -6,7 +6,11 @@ from task import prepare_model, load_flower_data, train_online, test
 class STGCNClient(NumPyClient):
     def __init__(self, partition_id, num_partitions, run_config):
         self.partition_id = partition_id
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        try:
+            import torch_directml
+            self.device = torch_directml.device()
+        except ImportError:
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dataset = run_config["dataset"]
         self.batch_size = run_config["batch-size"]
         self.online_steps = run_config["online-steps"]
@@ -15,7 +19,7 @@ class STGCNClient(NumPyClient):
         self.dataset_path = run_config["dataset-path"]
         
         self.model = prepare_model(self.dataset, self.dataset_path, self.device)
-        self.x_train, self.y_train, self.end_of_initial_data_index, self.data_per_step, self.val_iter, self.node_map = load_flower_data(
+        self.x_train, self.y_train, self.end_of_initial_data_index, self.data_per_step, self.val_iter, self.node_map, self.scaler = load_flower_data(
             self.dataset,
             partition_id,
             num_partitions,
@@ -41,16 +45,21 @@ class STGCNClient(NumPyClient):
         epochs = config["local-epochs"]
         lr = config["learning-rate"]
         
-        train_loss = train_online(self.model, self.x_train, self.y_train, self.end_of_initial_data_index, self.data_per_step, self.node_map, epochs, lr, self.batch_size, self.online_steps, self.device, self.partition_id)
+        train_loss = train_online(self.model, self.x_train, self.y_train, self.end_of_initial_data_index, self.data_per_step, self.node_map, epochs, lr, self.batch_size, self.online_steps, self.device, self.partition_id, val_iter=self.val_iter, scaler=self.scaler)
         
         return self.get_parameters(config={}), self.x_train.shape[0], {"train_loss": train_loss}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
         
-        loss = test(self.model, self.val_iter, self.node_map)
+        loss, mae, rmse, mape = test(self.model, self.val_iter, self.node_map, self.scaler)
         
-        return float(loss), len(self.val_iter.dataset), {"eval_loss": float(loss)}
+        return float(loss), len(self.val_iter.dataset), {
+            "eval_loss": float(loss),
+            "mae": float(mae),
+            "rmse": float(rmse),
+            "mape": float(mape)
+        }
 
 def client_fn(context):
     partition_id = context.node_config["partition-id"]
